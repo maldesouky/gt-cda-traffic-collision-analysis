@@ -1,0 +1,150 @@
+USE [chicago-crashes];
+
+PRINT 'STAGE 1: Creating LOCATION Geometry...'
+DROP TABLE IF EXISTS [crashes-temp-1];
+WITH CRASHES_TEMP AS (
+	SELECT
+		t1.CRASH_RECORD_ID,
+		t1.CRASH_DATE,
+		t1.POSTED_SPEED_LIMIT,
+		t1.TRAFFIC_CONTROL_DEVICE,
+		t1.DEVICE_CONDITION,
+		t1.WEATHER_CONDITION,
+		t1.LIGHTING_CONDITION,
+		t1.FIRST_CRASH_TYPE,
+		t1.TRAFFICWAY_TYPE,
+		t1.ROADWAY_SURFACE_COND,
+		t1.CRASH_TYPE,
+		t1.HIT_AND_RUN_I,
+		t1.DAMAGE,
+		t1.DATE_POLICE_NOTIFIED,
+		t1.STREET_NO,
+		t1.STREET_DIRECTION,
+		t1.STREET_NAME,
+		t1.BEAT_OF_OCCURRENCE,
+		t1.NUM_UNITS,
+		t1.MOST_SEVERE_INJURY,
+		t1.INJURIES_TOTAL,
+		t1.INJURIES_FATAL,
+		t1.INJURIES_INCAPACITATING,
+		t1.INJURIES_NON_INCAPACITATING,
+		t1.INJURIES_REPORTED_NOT_EVIDENT,
+		t1.INJURIES_NO_INDICATION,
+		t1.CRASH_HOUR,
+		t1.CRASH_DAY_OF_WEEK,
+		t1.CRASH_MONTH,
+		t1.LATITUDE,
+		t1.LONGITUDE,
+		geography::STGeomFromText(t1.[LOCATION], 4326) as LOCATION
+	FROM crashes t1
+	WHERE t1.[LOCATION] IS NOT NULL
+) SELECT * 
+INTO [crashes-temp-1]
+FROM CRASHES_TEMP
+
+
+
+PRINT 'STAGE 2: Reducing ZIP code shapes to district 606 and region 60...'
+DROP TABLE IF EXISTS [crashes-temp-zip-606];
+SELECT *
+INTO [crashes-temp-zip-606]
+FROM [zip-codes-2023]
+WHERE [zip-codes-2023].[ZCTA5CE20] like '606%'
+
+DROP TABLE IF EXISTS [crashes-temp-zip-60];
+SELECT *
+INTO [crashes-temp-zip-60]
+FROM [zip-codes-2023]
+WHERE [zip-codes-2023].[ZCTA5CE20] like '60%'
+
+
+
+PRINT 'STAGE 3: Calculating ZIP Codes - District 606...'
+DROP TABLE IF EXISTS [crashes-temp-2];
+
+WITH CRASHES_TEMP AS (
+	SELECT
+		t1.*,
+		t2.[ZCTA5CE20] AS ZIP_CODE
+	FROM [crashes-temp-1] t1
+	LEFT JOIN [crashes-temp-zip-606] t2
+		ON t1.[LOCATION].STWithin(t2.[Geometry]) = 1
+)
+SELECT *
+INTO [crashes-temp-2]
+FROM CRASHES_TEMP
+
+
+
+PRINT 'STAGE 4: Calculating ZIP Codes - Region 60...';
+--DROP TABLE IF EXISTS [crashes-temp-2];
+
+WITH CRASHES_TEMP AS (
+	SELECT
+		t1.*,
+		t2.[ZCTA5CE20] AS ZIP_CODEX
+	FROM [dbo].[crashes-temp-2]  t1
+	LEFT JOIN [crashes-temp-zip-60] t2
+		ON t1.[LOCATION].STWithin(t2.[Geometry]) = 1
+	
+	WHERE t1.[ZIP_CODE] IS NULL
+		  AND (t1.[LATITUDE]<>0 OR t1.[LONGITUDE]<>0)
+)
+UPDATE [crashes-temp-2]
+SET  [crashes-temp-2].ZIP_CODE = CRASHES_TEMP.ZIP_CODEX
+FROM [crashes-temp-2]
+LEFT JOIN CRASHES_TEMP
+	ON [crashes-temp-2].[CRASH_RECORD_ID] = CRASHES_TEMP.[CRASH_RECORD_ID]
+WHERE [crashes-temp-2].ZIP_CODE is NULL
+
+
+
+PRINT 'STAGE 5: Calculating ZIP Codes - Bufferred...';
+--DROP TABLE IF EXISTS [crashes-temp-2];
+
+WITH CRASHES_TEMP AS (
+	SELECT
+		t1.*,
+		t2.[ZCTA5CE20] AS ZIP_CODEX
+	FROM [dbo].[crashes-temp-2]  t1
+	LEFT JOIN [crashes-temp-zip-606] t2
+		ON t1.[LOCATION].STWithin(t2.[Geometry].STBuffer(10)) = 1
+	
+	WHERE t1.[ZIP_CODE] IS NULL
+		  AND (t1.[LATITUDE]<>0 OR t1.[LONGITUDE]<>0)
+)
+UPDATE [crashes-temp-2]
+SET  [crashes-temp-2].ZIP_CODE = CRASHES_TEMP.ZIP_CODEX
+FROM [crashes-temp-2]
+LEFT JOIN CRASHES_TEMP
+	ON [crashes-temp-2].[CRASH_RECORD_ID] = CRASHES_TEMP.[CRASH_RECORD_ID]
+WHERE [crashes-temp-2].ZIP_CODE is NULL
+
+
+
+PRINT 'STAGE 6: Calculating percentages...'
+DROP TABLE IF EXISTS [crashes-cleaned];
+WITH CRASHES_TEMP AS (
+	SELECT
+		t1.*
+	FROM [crashes-temp-2] t1
+	WHERE t1.[ZIP_CODE] IS NOT NULL
+)
+SELECT
+    *,
+	'UNDEFINED' AS [ZIP_CODE_GROUP],
+	CAST(INJURIES_TOTAL AS float) / (SELECT SUM(INJURIES_TOTAL) FROM CRASHES_TEMP) AS INJURIES_TOTAL_PCT,
+	CAST(INJURIES_FATAL AS float)  / (SELECT SUM(INJURIES_FATAL) FROM CRASHES_TEMP) AS INJURIES_FATAL_PCT,
+	CAST(INJURIES_INCAPACITATING AS float)  / (SELECT SUM(INJURIES_INCAPACITATING) FROM CRASHES_TEMP) AS INJURIES_INCAPACITATING_PCT
+INTO [crashes-cleaned]
+FROM CRASHES_TEMP
+
+
+PRINT 'STAGE 6: Cleaning up...'
+DROP TABLE IF EXISTS [crashes-temp-1];
+DROP TABLE IF EXISTS [crashes-temp-zip-606];
+DROP TABLE IF EXISTS [crashes-temp-zip-60];
+DROP TABLE IF EXISTS [crashes-temp-2];
+
+
+PRINT 'DONE!'
